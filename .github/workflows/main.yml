@@ -1,0 +1,227 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1) تحميل المشروع
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2) البحث عن ملف ZIP
+      - name: Find Android project ZIP
+        shell: bash
+        run: |
+          set -e
+
+          ZIP_FILE=$(find . -maxdepth 2 -type f -name "*.zip" | head -1)
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: No Android ZIP file found."
+            exit 1
+          fi
+
+          echo "Found ZIP: $ZIP_FILE"
+          echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
+
+      # 3) فك الضغط
+      - name: Extract Android project
+        shell: bash
+        run: |
+          set -e
+
+          rm -rf project
+          mkdir -p project
+
+          unzip -q "$ZIP_FILE" -d project
+
+          echo "Extracted files:"
+          find project -maxdepth 3 -type f | head -100
+
+          GRADLEW=$(find project -type f -name "gradlew" | head -1)
+
+          if [ -z "$GRADLEW" ]; then
+            echo "ERROR: gradlew was not found."
+            exit 1
+          fi
+
+          PROJECT_DIR=$(dirname "$GRADLEW")
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          echo "Android project:"
+          echo "$PROJECT_DIR"
+
+      # 4) Java 17
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      # 5) Android SDK
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      # 6) تثبيت الأدوات المطلوبة
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          set -e
+
+          yes | sdkmanager --licenses > /dev/null || true
+
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-37" \
+            "build-tools;36.0.0"
+
+      # 7) إصلاح إعداد BuildConfig بالطريقة الصحيحة
+      - name: Fix Android build configuration
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          chmod +x gradlew
+
+          echo "Project directory:"
+          pwd
+
+          echo ""
+          echo "Searching for deprecated BuildConfig property..."
+
+          # مهم جدًا:
+          # حذف الخاصية القديمة التي تم حذفها في AGP 9
+          find . -name "gradle.properties" -type f -print0 | while IFS= read -r -d '' file
+          do
+            sed -i '/^[[:space:]]*android\.defaults\.buildfeatures\.buildconfig[[:space:]]*=/d' "$file"
+            echo "Checked: $file"
+          done
+
+          echo ""
+          echo "Checking app Gradle files..."
+
+          find . -path "*/app/build.gradle.kts" -o -path "*/app/build.gradle"
+
+      # 8) تفعيل BuildConfig داخل app/build.gradle.kts
+      - name: Enable BuildConfig
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          APP_GRADLE=$(find . -path "*/app/build.gradle.kts" -type f | head -1)
+
+          if [ -z "$APP_GRADLE" ]; then
+            APP_GRADLE=$(find . -path "*/app/build.gradle" -type f | head -1)
+          fi
+
+          if [ -z "$APP_GRADLE" ]; then
+            echo "ERROR: app/build.gradle or app/build.gradle.kts not found."
+            exit 1
+          fi
+
+          echo "App Gradle file:"
+          echo "$APP_GRADLE"
+
+          python3 - "$APP_GRADLE" <<'PY'
+          import sys
+          from pathlib import Path
+
+          path = Path(sys.argv[1])
+          text = path.read_text()
+
+          # لا نستخدم android.defaults.buildfeatures.buildconfig
+          # لأن AGP 9 حذفه.
+
+          if "buildConfig = true" in text:
+              print("BuildConfig is already enabled.")
+              raise SystemExit(0)
+
+          marker = "android {"
+
+          if marker not in text:
+              print("ERROR: android { block was not found.")
+              raise SystemExit(1)
+
+          replacement = """android {
+              buildFeatures {
+                  buildConfig = true
+              }
+          """
+
+          text = text.replace(marker, replacement, 1)
+
+          path.write_text(text)
+
+          print("BuildConfig enabled successfully.")
+          PY
+
+          echo ""
+          echo "Relevant build configuration:"
+          grep -n -A6 -B2 "buildFeatures" "$APP_GRADLE" || true
+
+      # 9) إنشاء ملف Supabase إذا كان المشروع يحتاجه
+      - name: Prepare Supabase properties
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+
+          if [ ! -f supabase.properties ]; then
+            if [ -f supabase.properties.example ]; then
+              cp supabase.properties.example supabase.properties
+            else
+              touch supabase.properties
+            fi
+          fi
+
+      # 10) فحص Gradle
+      - name: Test Gradle
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+
+          ./gradlew tasks --no-daemon
+
+      # 11) Build APK
+      - name: Build Debug APK
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          ./gradlew :app:assembleDebug \
+            --no-daemon \
+            --stacktrace
+
+      # 12) البحث عن APK
+      - name: Find APK
+        shell: bash
+        run: |
+          echo "Searching for APK..."
+
+          find "$PROJECT_DIR/app/build/outputs" \
+            -type f \
+            -name "*.apk" \
+            -print
+
+      # 13) رفع APK
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: MRX-debug-APK
+          path: |
+            ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error

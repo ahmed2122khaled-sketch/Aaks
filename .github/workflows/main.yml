@@ -1,0 +1,175 @@
+name: Build Android APK
+
+on:
+push:
+branches:
+- main
+- master
+
+pull_request:
+branches:
+- main
+- master
+
+workflow_dispatch:
+
+permissions:
+contents: read
+
+concurrency:
+group: android-build-${{ github.workflow }}-${{ github.ref }}
+cancel-in-progress: true
+
+jobs:
+build:
+name: Build Mr.x APK
+runs-on: ubuntu-latest
+timeout-minutes: 40
+
+steps:
+  # 1. Download the repository
+  - name: Checkout Repository
+    uses: actions/checkout@v4
+
+  # 2. Set up Java 17 without Gradle cache
+  - name: Set up JDK 17
+    uses: actions/setup-java@v5
+    with:
+      distribution: temurin
+      java-version: "17"
+
+  # 3. Set up Android SDK
+  - name: Set up Android SDK
+    uses: android-actions/setup-android@v3
+
+  # 4. Accept Android SDK licenses
+  - name: Accept Android SDK licenses
+    shell: bash
+    run: |
+      set -e
+      sdkmanager --licenses < /dev/null
+
+  # 5. Install Android SDK packages
+  - name: Install required Android SDK packages
+    run: |
+      sdkmanager \
+        "platform-tools" \
+        "platforms;android-37"
+
+  # 6. Verify project structure
+  - name: Verify Android project structure
+    shell: bash
+    run: |
+      set -e
+
+      test -f "./gradlew" || {
+        echo "::error::gradlew not found in repository root."
+        exit 1
+      }
+
+      test -f "./settings.gradle.kts" || {
+        echo "::error::settings.gradle.kts not found."
+        exit 1
+      }
+
+      test -f "./app/build.gradle.kts" || {
+        echo "::error::app/build.gradle.kts not found."
+        exit 1
+      }
+
+      test -f "./app/src/main/AndroidManifest.xml" || {
+        echo "::error::AndroidManifest.xml not found."
+        exit 1
+      }
+
+      chmod +x ./gradlew
+
+      echo "Android project structure verified."
+
+  # 7. Check for Java source files
+  - name: Verify Kotlin-only source code
+    shell: bash
+    run: |
+      set -e
+
+      if find app/src -type f -name "*.java" -print -quit | grep -q .; then
+        echo "::error::Java source files were found under app/src."
+        find app/src -type f -name "*.java"
+        exit 1
+      fi
+
+      echo "No Java source files found under app/src."
+
+  # 8. Prepare optional Supabase configuration
+  - name: Prepare Supabase configuration
+    shell: bash
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+      SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+    run: |
+      set -e
+
+      if [ -n "$SUPABASE_URL" ] || \
+         [ -n "$SUPABASE_ANON_KEY" ] || \
+         [ -n "$SUPABASE_PUBLISHABLE_KEY" ]; then
+
+        {
+          printf 'supabase.url=%s\n' "$SUPABASE_URL"
+          printf 'supabase.anonKey=%s\n' "$SUPABASE_ANON_KEY"
+          printf 'supabase.publishableKey=%s\n' "$SUPABASE_PUBLISHABLE_KEY"
+        } > supabase.properties
+
+        echo "Supabase configuration file prepared."
+      else
+        echo "Supabase secrets not configured; continuing."
+      fi
+
+  # 9. Verify Java and Gradle
+  - name: Show Java and Gradle versions
+    run: |
+      java -version
+      ./gradlew --version
+
+  # 10. Build the debug APK
+  - name: Build Debug APK
+    run: |
+      ./gradlew :app:assembleDebug \
+        --no-daemon \
+        --stacktrace
+
+  # 11. Verify APK output
+  - name: Verify APK was generated
+    shell: bash
+    run: |
+      set -e
+
+      APK="app/build/outputs/apk/debug/app-debug.apk"
+
+      if [ ! -f "$APK" ]; then
+        echo "::error::Debug APK was not generated."
+        echo "Searching for available APK files..."
+
+        find app/build/outputs -type f -name "*.apk" -print || true
+
+        exit 1
+      fi
+
+      echo "APK generated successfully."
+      ls -lh "$APK"
+
+  # 12. Rename APK
+  - name: Rename APK to Mr.x.apk
+    shell: bash
+    run: |
+      cp "app/build/outputs/apk/debug/app-debug.apk" "Mr.x.apk"
+      ls -lh "Mr.x.apk"
+
+  # 13. Upload APK to GitHub Actions artifacts
+  - name: Upload APK artifact
+    uses: actions/upload-artifact@v4
+    with:
+      name: Mr.x-debug-apk
+      path: Mr.x.apk
+      if-no-files-found: error
+      retention-days: 14

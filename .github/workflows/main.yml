@@ -1,0 +1,182 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build debug APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+
+    steps:
+
+      # ============================================================
+      # 1. Checkout
+      # ============================================================
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+
+      # ============================================================
+      # 2. Java 17
+      # ============================================================
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+
+      # ============================================================
+      # 3. Android SDK / Command Line Tools
+      # ============================================================
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          cmdline-tools-version: '15859902'
+
+
+      # ============================================================
+      # 4. Accept Android SDK licenses
+      # ============================================================
+      - name: Accept Android SDK licenses
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "Accepting Android SDK licenses"
+          echo "=========================================="
+
+          yes | sdkmanager --licenses >/tmp/sdk-licenses.log 2>&1 || true
+
+          echo "Licenses processed."
+
+
+      # ============================================================
+      # 5. Find Android project
+      # ============================================================
+      - name: Find Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "Finding Android project"
+          echo "=========================================="
+
+          if [ -f "settings.gradle.kts" ] || [ -f "settings.gradle" ]; then
+            PROJECT_DIR="$PWD"
+
+          elif [ -f "app/settings.gradle.kts" ] || [ -f "app/settings.gradle" ]; then
+            PROJECT_DIR="$PWD/app"
+
+          else
+            FOUND_SETTINGS="$(find . -maxdepth 4 \
+              -name settings.gradle.kts -o -name settings.gradle \
+              -print -quit || true)"
+
+            if [ -n "$FOUND_SETTINGS" ]; then
+              PROJECT_DIR="$(cd "$(dirname "$FOUND_SETTINGS")" && pwd)"
+            else
+              echo "::error::Could not find settings.gradle or settings.gradle.kts"
+              exit 1
+            fi
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          echo ""
+          echo "Project directory:"
+          echo "$PROJECT_DIR"
+
+
+      # ============================================================
+      # 6. Validate project structure
+      # ============================================================
+      - name: Validate project structure
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "Validating project structure"
+          echo "=========================================="
+
+          cd "$PROJECT_DIR"
+
+          if [ ! -f "gradlew" ]; then
+            echo "::error::gradlew was not found"
+            exit 1
+          fi
+
+          if [ ! -f "settings.gradle.kts" ] && [ ! -f "settings.gradle" ]; then
+            echo "::error::Gradle settings file was not found"
+            exit 1
+          fi
+
+          if [ ! -d "app" ]; then
+            echo "::error::app directory was not found"
+            exit 1
+          fi
+
+          chmod +x gradlew
+
+          echo "Project structure OK."
+
+
+      # ============================================================
+      # 7. Verify Android configuration
+      # ============================================================
+      - name: Verify Android configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "Verifying Android configuration"
+          echo "=========================================="
+
+          cd "$PROJECT_DIR"
+
+          if [ ! -f "app/build.gradle.kts" ]; then
+            echo "::error::app/build.gradle.kts was not found"
+            exit 1
+          fi
+
+          echo ""
+          echo "Checking compileSdk..."
+
+          if grep -Eq 'compileSdk[[:space:]]*=[[:space:]]*37' app/build.gradle.kts; then
+            echo "compileSdk 37 detected."
+          else
+            echo "::error::compileSdk 37 was not detected."
+            exit 1
+          fi
+
+          echo ""
+          echo "Checking targetSdk..."
+
+          if grep -Eq 'targetSdk[[:space:]]*=[[:space:]]*37' app/build.gradle.kts; then
+            echo "targetSdk 37 detected."
+          else
+            echo "::error::targetSdk 37 was not detected."
+            exit 1
+          fi
+
+          echo ""
+          echo "Checking BuildConfig..."
+
+          if grep -Eq 'buildConfig[[:space:]]*=[[:space:]]*true' app

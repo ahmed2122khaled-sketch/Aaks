@@ -1,0 +1,48 @@
+name: Build Android APK
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+    - name: Setup Android SDK
+      run: |
+        wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O cmdline-tools.zip
+        mkdir -p $HOME/android-sdk/cmdline-tools
+        unzip -q cmdline-tools.zip -d $HOME/android-sdk/cmdline-tools
+        mv $HOME/android-sdk/cmdline-tools/cmdline-tools $HOME/android-sdk/cmdline-tools/latest
+        echo "$HOME/android-sdk/cmdline-tools/latest/bin" >> $GITHUB_PATH
+        echo "$HOME/android-sdk/platform-tools" >> $GITHUB_PATH
+        yes | $HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager --licenses || true
+        $HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+    - name: Extract Project and Find Gradlew
+      run: |
+        unzip -q mrx-51-final-fixed-ready.zip -d project
+        GRADLEW=$(find project -name gradlew -type f | head -1)
+        if [ -z "$GRADLEW" ]; then
+          echo "ERROR: gradlew not found inside ZIP"
+          exit 1
+        fi
+        PROJECT_DIR=$(dirname "$GRADLEW")
+        echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
+        echo "Found project at: $PROJECT_DIR"
+    - name: Grant execute permission
+      run: chmod +x $PROJECT_DIR/gradlew
+    - name: Build Debug APK
+      run: |
+        cd $PROJECT_DIR
+        ./gradlew assembleDebug --no-daemon --stacktrace
+    - name: Upload APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: app-debug
+        path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk

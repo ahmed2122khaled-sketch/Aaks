@@ -1,0 +1,49 @@
+      - name: Install Android SDK components
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "Android SDK"
+          echo "=========================================="
+
+          echo "sdkmanager version:"
+          sdkmanager --version
+
+          echo ""
+          echo "Available Android 37 packages:"
+          sdkmanager --list --channel=1 | grep -E \
+            'platforms;android-37|build-tools;37|platform-tools' \
+            || true
+
+          echo ""
+          echo "Installing Android 17 / API 37..."
+
+          sdkmanager --channel=1 --install \
+            "platform-tools" \
+            "platforms;android-37" \
+            "build-tools;36.0.0"
+
+          echo ""
+          echo "Checking Android SDK installation..."
+
+          if [ ! -d "${ANDROID_SDK_ROOT}/platforms/android-37" ]; then
+            echo "::error::Android platform android-37 was not installed."
+            echo ""
+            echo "Installed platforms:"
+            find "${ANDROID_SDK_ROOT}/platforms" \
+              -maxdepth 1 \
+              -type d \
+              -print || true
+            exit 1
+          fi
+
+          if [ ! -d "${ANDROID_SDK_ROOT}/build-tools/36.0.0" ]; then
+            echo "::error::Build tools 36.0.0 were not installed."
+            exit 1
+          fi
+
+          echo ""
+          echo "=========================================="
+          echo "Android SDK 37 READY"
+          echo "=========================================="

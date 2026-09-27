@@ -1,0 +1,210 @@
+name: Mr.x Project Doctor
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  doctor:
+    name: Diagnose Mr.x Project
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          accept-android-sdk-licenses: true
+          log-accepted-android-sdk-licenses: false
+          packages: platform-tools
+
+      - name: Detect project requirements
+        shell: bash
+        run: |
+          set -u
+
+          REPORT="$GITHUB_STEP_SUMMARY"
+
+          echo "# 🔍 Mr.x Project Doctor" >> "$REPORT"
+          echo "" >> "$REPORT"
+          echo "Automatic project/environment diagnosis." >> "$REPORT"
+          echo "" >> "$REPORT"
+
+          fail=0
+
+          echo "## 1. Project files" >> "$REPORT"
+          for f in             "./gradlew"             "./settings.gradle.kts"             "./build.gradle.kts"             "./app/build.gradle.kts"             "./app/src/main/AndroidManifest.xml"             "./gradle/wrapper/gradle-wrapper.properties"
+          do
+            if [ -f "$f" ]; then
+              echo "✅ \`$f\`" >> "$REPORT"
+            else
+              echo "❌ \`$f\` — missing" >> "$REPORT"
+              fail=1
+            fi
+          done
+          echo "" >> "$REPORT"
+
+          echo "## 2. Source files" >> "$REPORT"
+          java_count="$(find app/src -type f -name '*.java' 2>/dev/null | wc -l | tr -d ' ')"
+          kt_count="$(find app/src -type f -name '*.kt' 2>/dev/null | wc -l | tr -d ' ')"
+          echo "- Java files: **$java_count**" >> "$REPORT"
+          echo "- Kotlin files: **$kt_count**" >> "$REPORT"
+
+          if [ "$java_count" -eq 0 ]; then
+            echo "✅ No Java source files found." >> "$REPORT"
+          else
+            echo "⚠️ Java source files still exist." >> "$REPORT"
+          fi
+          echo "" >> "$REPORT"
+
+          echo "## 3. Android SDK requirements" >> "$REPORT"
+
+          compile_sdk="$(grep -Eo 'compileSdk(Preview)?[[:space:]]*=[[:space:]]*[0-9]+' app/build.gradle.kts 2>/dev/null | grep -Eo '[0-9]+' | tail -1 || true)"
+          min_sdk="$(grep -Eo 'minSdk(Version)?[[:space:]]*=[[:space:]]*[0-9]+' app/build.gradle.kts 2>/dev/null | grep -Eo '[0-9]+' | tail -1 || true)"
+          target_sdk="$(grep -Eo 'targetSdk(Version)?[[:space:]]*=[[:space:]]*[0-9]+' app/build.gradle.kts 2>/dev/null | grep -Eo '[0-9]+' | tail -1 || true)"
+
+          echo "| Setting | Detected |" >> "$REPORT"
+          echo "|---|---:|" >> "$REPORT"
+          echo "| compileSdk | ${compile_sdk:-Not detected} |" >> "$REPORT"
+          echo "| minSdk | ${min_sdk:-Not detected} |" >> "$REPORT"
+          echo "| targetSdk | ${target_sdk:-Not detected} |" >> "$REPORT"
+          echo "" >> "$REPORT"
+
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+
+          if [ -n "$compile_sdk" ]; then
+            echo "### SDK Platform candidates" >> "$REPORT"
+
+            found_platform=0
+            for platform_dir in               "$SDK_ROOT/platforms/android-$compile_sdk"               "$SDK_ROOT/platforms/android-$compile_sdk.0"               "$SDK_ROOT/platforms/android-$compile_sdk.1"               "$SDK_ROOT/platforms/android-$compile_sdk.2"
+            do
+              if [ -d "$platform_dir" ]; then
+                echo "✅ Found: \`$(basename "$platform_dir")\`" >> "$REPORT"
+                found_platform=1
+              fi
+            done
+
+            if [ "$found_platform" -eq 0 ]; then
+              echo "❌ Android SDK Platform for compileSdk $compile_sdk is not installed." >> "$REPORT"
+              fail=1
+            fi
+          else
+            echo "⚠️ Could not automatically detect compileSdk." >> "$REPORT"
+          fi
+
+          echo "" >> "$REPORT"
+          echo "## 4. Java / Gradle" >> "$REPORT"
+          echo '```text' >> "$REPORT"
+          java -version 2>&1 | head -3 >> "$REPORT"
+          echo "" >> "$REPORT"
+
+          chmod +x ./gradlew 2>/dev/null || true
+          if [ -x "./gradlew" ]; then
+            ./gradlew --version 2>&1 | head -20 >> "$REPORT" || true
+          fi
+          echo '```' >> "$REPORT"
+          echo "" >> "$REPORT"
+
+          echo "## 5. Android Gradle Plugin / Kotlin configuration" >> "$REPORT"
+          echo '```text' >> "$REPORT"
+          grep -RniE             'com.android.application|com.android.library|org.jetbrains.kotlin|kotlin\("android"\)|kotlin.android'             settings.gradle.kts build.gradle.kts app/build.gradle.kts 2>/dev/null             | head -50 >> "$REPORT" || true
+          echo '```' >> "$REPORT"
+          echo "" >> "$REPORT"
+
+          echo "## 6. Explicit build tools requirement" >> "$REPORT"
+          build_tools="$(grep -Eo 'buildToolsVersion[[:space:]]*=[[:space:]]*"[^"]+"' app/build.gradle.kts 2>/dev/null | head -1 || true)"
+
+          if [ -n "$build_tools" ]; then
+            echo "⚠️ Explicit setting found: \`$build_tools\`" >> "$REPORT"
+          else
+            echo "✅ No explicit buildToolsVersion found; AGP can select its compatible default." >> "$REPORT"
+          fi
+          echo "" >> "$REPORT"
+
+          echo "## 7. Gradle configuration test" >> "$REPORT"
+          if [ -x "./gradlew" ]; then
+            if ./gradlew help --no-daemon --stacktrace > /tmp/mrx-gradle-doctor.log 2>&1; then
+              echo "✅ Gradle project configuration succeeded." >> "$REPORT"
+            else
+              echo "❌ Gradle project configuration failed." >> "$REPORT"
+              echo "" >> "$REPORT"
+              echo '```text' >> "$REPORT"
+              tail -80 /tmp/mrx-gradle-doctor.log >> "$REPORT"
+              echo '```' >> "$REPORT"
+              fail=1
+            fi
+          else
+            echo "❌ gradlew is missing or not executable." >> "$REPORT"
+            fail=1
+          fi
+          echo "" >> "$REPORT"
+
+          echo "## 8. Dependency resolution test" >> "$REPORT"
+          if [ -x "./gradlew" ]; then
+            if ./gradlew :app:dependencies --configuration debugRuntimeClasspath --no-daemon > /tmp/mrx-dependencies.log 2>&1; then
+              echo "✅ Debug dependencies resolved successfully." >> "$REPORT"
+            else
+              echo "❌ Dependency resolution failed." >> "$REPORT"
+              echo "" >> "$REPORT"
+              echo '```text' >> "$REPORT"
+              tail -100 /tmp/mrx-dependencies.log >> "$REPORT"
+              echo '```' >> "$REPORT"
+              fail=1
+            fi
+          fi
+          echo "" >> "$REPORT"
+
+          echo "## 9. GitHub Secrets" >> "$REPORT"
+          if [ -n "${SUPABASE_URL:-}" ]; then
+            echo "⚠️ SUPABASE_URL is available to this job." >> "$REPORT"
+          else
+            echo "ℹ️ SUPABASE_URL is not configured for this workflow." >> "$REPORT"
+          fi
+
+          if [ -n "${SUPABASE_PUBLISHABLE_KEY:-}" ]; then
+            echo "⚠️ SUPABASE_PUBLISHABLE_KEY is available to this job." >> "$REPORT"
+          else
+            echo "ℹ️ SUPABASE_PUBLISHABLE_KEY is not configured for this workflow." >> "$REPORT"
+          fi
+          echo "" >> "$REPORT"
+
+          echo "## 10. Final diagnosis" >> "$REPORT"
+
+          if [ "$fail" -eq 0 ]; then
+            echo "### ✅ No blocking environment/project errors detected." >> "$REPORT"
+            echo "" >> "$REPORT"
+            echo "The project passed the available static, SDK, Gradle configuration, and dependency checks." >> "$REPORT"
+          else
+            echo "### ❌ Blocking problems detected." >> "$REPORT"
+            echo "" >> "$REPORT"
+            echo "Review the failed checks above before running the APK build." >> "$REPORT"
+            exit 1
+          fi
+
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+
+      - name: Upload diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mr.x-project-doctor-logs
+          path: |
+            /tmp/mrx-gradle-doctor.log
+            /tmp/mrx-dependencies.log
+          if-no-files-found: ignore
+          retention-days: 14

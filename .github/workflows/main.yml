@@ -1,0 +1,639 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build debug APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+
+    steps:
+
+      # ============================================================
+      # 1. Checkout
+      # ============================================================
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+
+      # ============================================================
+      # 2. Java 17
+      # ============================================================
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+
+      # ============================================================
+      # 3. Android SDK
+      # ============================================================
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          cmdline-tools-version: '15859902'
+
+
+      # ============================================================
+      # 4. Accept licenses
+      # ============================================================
+      - name: Accept Android SDK licenses
+        shell: bash
+        run: |
+          set -e
+
+          echo "=========================================="
+          echo "Accepting Android SDK licenses"
+          echo "=========================================="
+
+          yes | sdkmanager --licenses >/tmp/sdk-licenses.log 2>&1 || true
+
+          echo "Licenses processed."
+
+
+      # ============================================================
+      # 5. Find Android project
+      # ============================================================
+      - name: Find Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "Finding Android project"
+          echo "=========================================="
+
+          PROJECT_DIR=""
+
+          # --------------------------------------------------------
+          # Check repository root
+          # --------------------------------------------------------
+          if [ -f "$PWD/settings.gradle.kts" ] || \
+             [ -f "$PWD/settings.gradle" ]; then
+
+            PROJECT_DIR="$PWD"
+
+          # --------------------------------------------------------
+          # Check ./app
+          # --------------------------------------------------------
+          elif [ -f "$PWD/app/settings.gradle.kts" ] || \
+               [ -f "$PWD/app/settings.gradle" ]; then
+
+            PROJECT_DIR="$PWD/app"
+
+          fi
+
+
+          # --------------------------------------------------------
+          # Search directories safely
+          # No complex find expression here.
+          # --------------------------------------------------------
+          if [ -z "$PROJECT_DIR" ]; then
+
+            for DIR in \
+              "$PWD"/* \
+              "$PWD"/*/* \
+              "$PWD"/*/*/* \
+              "$PWD"/*/*/*/*; do
+
+              if [ -d "$DIR" ]; then
+
+                if [ -f "$DIR/settings.gradle.kts" ] || \
+                   [ -f "$DIR/settings.gradle" ]; then
+
+                  PROJECT_DIR="$(cd "$DIR" && pwd)"
+                  break
+
+                fi
+
+              fi
+
+            done
+
+          fi
+
+
+          # --------------------------------------------------------
+          # If not found, look for ZIP files
+          # --------------------------------------------------------
+          if [ -z "$PROJECT_DIR" ]; then
+
+            echo ""
+            echo "No Android project directory found."
+            echo "Checking ZIP archives..."
+
+            mkdir -p "$RUNNER_TEMP/android-project"
+
+            ZIP_FILE=""
+
+            for FILE in "$PWD"/*.zip; do
+              if [ -f "$FILE" ]; then
+                ZIP_FILE="$FILE"
+                break
+              fi
+            done
+
+            if [ -n "$ZIP_FILE" ]; then
+
+              echo "ZIP found:"
+              echo "$ZIP_FILE"
+
+              rm -rf "$RUNNER_TEMP/android-project/*" 2>/dev/null || true
+
+              unzip -q "$ZIP_FILE" \
+                -d "$RUNNER_TEMP/android-project"
+
+              # Search extracted directories without complex find syntax.
+              for DIR in \
+                "$RUNNER_TEMP/android-project" \
+                "$RUNNER_TEMP/android-project"/* \
+                "$RUNNER_TEMP/android-project"/*/* \
+                "$RUNNER_TEMP/android-project"/*/*/* \
+                "$RUNNER_TEMP/android-project"/*/*/*/*; do
+
+                if [ -d "$DIR" ]; then
+
+                  if [ -f "$DIR/settings.gradle.kts" ] || \
+                     [ -f "$DIR/settings.gradle" ]; then
+
+                    PROJECT_DIR="$(cd "$DIR" && pwd)"
+                    break
+
+                  fi
+
+                fi
+
+              done
+
+            fi
+
+          fi
+
+
+          # --------------------------------------------------------
+          # Final validation
+          # --------------------------------------------------------
+          if [ -z "$PROJECT_DIR" ]; then
+
+            echo ""
+            echo "::error::Could not find settings.gradle or settings.gradle.kts"
+
+            echo ""
+            echo "Repository contents:"
+            ls -la
+
+            echo ""
+            echo "Directories:"
+            for ITEM in "$PWD"/*; do
+              echo "$ITEM"
+            done
+
+            exit 1
+
+          fi
+
+
+          echo ""
+          echo "=========================================="
+          echo "Android project found"
+          echo "=========================================="
+
+          echo "PROJECT_DIR=$PROJECT_DIR"
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+
+      # ============================================================
+      # 6. Validate project structure
+      # ============================================================
+      - name: Validate project structure
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "Validating project structure"
+          echo "=========================================="
+
+          cd "$PROJECT_DIR"
+
+          echo "Project:"
+          pwd
+
+          echo ""
+
+          if [ ! -f "gradlew" ]; then
+            echo "::error::gradlew was not found"
+            exit 1
+          fi
+
+          if [ ! -f "settings.gradle.kts" ] && \
+             [ ! -f "settings.gradle" ]; then
+            echo "::error::Gradle settings file was not found"
+            exit 1
+          fi
+
+          if [ ! -d "app" ]; then
+            echo "::error::app directory was not found"
+            exit 1
+          fi
+
+          if [ ! -f "app/build.gradle.kts" ] && \
+             [ ! -f "app/build.gradle" ]; then
+            echo "::error::app/build.gradle.kts or app/build.gradle was not found"
+            exit 1
+          fi
+
+          chmod +x gradlew
+
+          echo ""
+          echo "Project structure OK."
+
+
+      # ============================================================
+      # 7. Verify Android configuration
+      # ============================================================
+      - name: Verify Android configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          echo "=========================================="
+          echo "Verifying Android configuration"
+          echo "=========================================="
+
+          if [ -f "app/build.gradle.kts" ]; then
+
+            if grep -Eq \
+              'compileSdk[[:space:]]*=[[:space:]]*37' \
+              app/build.gradle.kts; then
+
+              echo "compileSdk 37 detected."
+
+            else
+
+              echo "::error::compileSdk 37 was not detected."
+              exit 1
+
+            fi
+
+
+            if grep -Eq \
+              'targetSdk[[:space:]]*=[[:space:]]*37' \
+              app/build.gradle.kts; then
+
+              echo "targetSdk 37 detected."
+
+            else
+
+              echo "::error::targetSdk 37 was not detected."
+              exit 1
+
+            fi
+
+          else
+
+            echo "::error::Kotlin Gradle build file not found."
+            exit 1
+
+          fi
+
+          echo ""
+          echo "Android configuration OK."
+
+
+      # ============================================================
+      # 8. Install Android SDK components
+      # ============================================================
+      - name: Install Android SDK components
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "Android SDK"
+          echo "=========================================="
+
+          SDKMANAGER="$(command -v sdkmanager)"
+
+          echo "sdkmanager:"
+          echo "$SDKMANAGER"
+
+          echo ""
+          echo "sdkmanager version:"
+          "$SDKMANAGER" --version
+
+          echo ""
+          echo "=========================================="
+          echo "Searching for Android API 37"
+          echo "=========================================="
+
+          SDK_LIST="$("$SDKMANAGER" --list --channel=3 2>&1 || true)"
+
+          echo "$SDK_LIST" | grep -E \
+            'platforms;android-37|platforms/android-37|build-tools;36|platform-tools' \
+            || true
+
+          PLATFORM_PACKAGE=""
+
+          if echo "$SDK_LIST" | grep -Eq \
+            'platforms;android-37([[:space:]]|$)'; then
+
+            PLATFORM_PACKAGE="platforms;android-37"
+
+          elif echo "$SDK_LIST" | grep -Eq \
+            'platforms/android-37([[:space:]]|$)'; then
+
+            PLATFORM_PACKAGE="platforms/android-37"
+
+          fi
+
+          if [ -z "$PLATFORM_PACKAGE" ]; then
+
+            echo ""
+            echo "::error::Android API 37 package was not found."
+
+            echo ""
+            echo "Packages containing android-37:"
+            echo "$SDK_LIST" | grep -i 'android-37' || true
+
+            exit 1
+
+          fi
+
+          echo ""
+          echo "Detected:"
+          echo "$PLATFORM_PACKAGE"
+
+          echo ""
+          echo "Installing..."
+
+          "$SDKMANAGER" --channel=3 --install \
+            "platform-tools" \
+            "$PLATFORM_PACKAGE" \
+            "build-tools;36.0.0"
+
+          echo ""
+          echo "Android SDK installation completed."
+
+
+      # ============================================================
+      # 9. Verify Android 37
+      # ============================================================
+      - name: Verify Android 37 SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "Verifying Android 37 SDK"
+          echo "=========================================="
+
+          PLATFORM_DIR="$ANDROID_SDK_ROOT/platforms/android-37"
+
+          if [ ! -d "$PLATFORM_DIR" ]; then
+            echo "::error::Android 37 platform was not installed."
+            exit 1
+          fi
+
+          if [ ! -f "$PLATFORM_DIR/android.jar" ]; then
+            echo "::error::android.jar was not found."
+            exit 1
+          fi
+
+          echo "Android 37 SDK verified."
+
+
+      # ============================================================
+      # 10. Verify Gradle Wrapper
+      # ============================================================
+      - name: Verify Gradle Wrapper
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          echo "=========================================="
+          echo "Verifying Gradle Wrapper"
+          echo "=========================================="
+
+          chmod +x gradlew
+
+          if [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
+            echo "::error::gradle-wrapper.jar was not found"
+            exit 1
+          fi
+
+          if [ ! -f "gradle/wrapper/gradle-wrapper.properties" ]; then
+            echo "::error::gradle-wrapper.properties was not found"
+            exit 1
+          fi
+
+          echo ""
+          echo "Gradle distribution:"
+          grep '^distributionUrl=' \
+            gradle/wrapper/gradle-wrapper.properties || true
+
+          echo ""
+          echo "Gradle wrapper OK."
+
+
+      # ============================================================
+      # 11. Configure Supabase
+      # ============================================================
+      - name: Configure Supabase
+        shell: bash
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          echo "=========================================="
+          echo "Configuring Supabase"
+          echo "=========================================="
+
+          if [ -n "${SUPABASE_URL:-}" ] && \
+             [ -n "${SUPABASE_ANON_KEY:-}" ]; then
+
+            cat > supabase.properties <<EOF
+SUPABASE_URL=${SUPABASE_URL}
+SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
+EOF
+
+            echo "Supabase configured."
+
+          else
+
+            echo "Supabase secrets not provided."
+            echo "Continuing."
+
+          fi
+
+
+      # ============================================================
+      # 12. Static verification
+      # ============================================================
+      - name: Static project verification
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          echo "=========================================="
+          echo "Static project verification"
+          echo "=========================================="
+
+          echo ""
+          echo "Root:"
+          ls -la
+
+          echo ""
+          echo "App:"
+          ls -la app
+
+          echo ""
+          echo "Kotlin source files:"
+
+          KOTLIN_COUNT=0
+
+          for FILE in \
+            app/src/main/kotlin/*.kt \
+            app/src/main/kotlin/*/*.kt \
+            app/src/main/kotlin/*/*/*.kt \
+            app/src/main/kotlin/*/*/*/*.kt \
+            app/src/main/kotlin/*/*/*/*/*.kt; do
+
+            if [ -f "$FILE" ]; then
+              echo "$FILE"
+              KOTLIN_COUNT=$((KOTLIN_COUNT + 1))
+            fi
+
+          done
+
+          echo ""
+          echo "Kotlin files found: $KOTLIN_COUNT"
+
+          if [ "$KOTLIN_COUNT" -eq 0 ]; then
+            echo "::error::No Kotlin files found."
+            exit 1
+          fi
+
+          echo ""
+          echo "Static verification passed."
+
+
+      # ============================================================
+      # 13. Clean
+      # ============================================================
+      - name: Clean project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          echo "=========================================="
+          echo "Gradle clean"
+          echo "=========================================="
+
+          ./gradlew clean \
+            --no-daemon \
+            --stacktrace
+
+
+      # ============================================================
+      # 14. Build Debug APK
+      # ============================================================
+      - name: Build Debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          echo "=========================================="
+          echo "Building Debug APK"
+          echo "=========================================="
+
+          ./gradlew :app:assembleDebug \
+            --no-daemon \
+            --stacktrace \
+            --info
+
+
+      # ============================================================
+      # 15. Verify APK
+      # ============================================================
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          echo "=========================================="
+          echo "Verifying APK"
+          echo "=========================================="
+
+          APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
+
+          if [ ! -f "$APK_PATH" ]; then
+            echo "::error::APK was not generated."
+
+            echo ""
+            echo "Build outputs:"
+            ls -R app/build/outputs 2>/dev/null || true
+
+            exit 1
+          fi
+
+          APK_SIZE="$(stat -c%s "$APK_PATH")"
+
+          echo ""
+          echo "APK:"
+          echo "$APK_PATH"
+
+          echo ""
+          echo "APK size:"
+          echo "$APK_SIZE bytes"
+
+          if [ "$APK_SIZE" -lt 10000 ]; then
+            echo "::error::APK is unexpectedly small."
+            exit 1
+          fi
+
+          echo ""
+          echo "APK verification passed."
+
+
+      # ============================================================
+      # 16. Upload APK
+      # ============================================================
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: socialnetwork-debug-apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14

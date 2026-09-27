@@ -1,0 +1,103 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download repository
+        uses: actions/checkout@v4
+
+      - name: Find and Extract Android project ZIP
+        run: |
+          mkdir -p project
+          # البحث التلقائي عن أي ملف zip في المستودع وفكه
+          ZIP_FILE=$(find . -maxdepth 2 -name "*.zip" | head -1)
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: No ZIP file found in the repository!"
+            exit 1
+          fi
+          echo "Found ZIP file: $ZIP_FILE"
+          unzip -q "$ZIP_FILE" -d project
+          
+          echo "Extracted files preview:"
+          find project -maxdepth 3 -type f | head -50
+          
+          GRADLEW=$(find project -name gradlew -type f | head -1)
+          if [ -z "$GRADLEW" ]; then
+            echo "ERROR: gradlew was not found inside the extracted ZIP"
+            exit 1
+          fi
+          PROJECT_DIR=$(dirname "$GRADLEW")
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK and Accept Licenses
+        run: |
+          export ANDROID_SDK_ROOT=$HOME/android-sdk
+          mkdir -p $ANDROID_SDK_ROOT/cmdline-tools
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O cmdline-tools.zip
+          unzip -q cmdline-tools.zip -d $ANDROID_SDK_ROOT/cmdline-tools
+          mv $ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools $ANDROID_SDK_ROOT/cmdline-tools/latest
+          
+          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "$ANDROID_SDK_ROOT/platform-tools" >> $GITHUB_PATH
+          export PATH=$PATH:$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools
+
+          yes | sdkmanager --licenses || true
+          sdkmanager "platform-tools" "platforms;android-37.0" "build-tools;36.0.0"
+
+      - name: Fix Build Configuration in Project Files
+        run: |
+          cd "$PROJECT_DIR"
+          chmod +x gradlew
+          
+          # حقن تفعيل buildConfig قسرياً لتجنب خطأ الإصدارات الحديثة
+          APP_BUILD_GRADLE=$(find . -path "*/app/build.gradle.kts" -o -path "*/app/build.gradle" | head -1)
+          if [ -n "$APP_BUILD_GRADLE" ]; then
+            python3 -c "
+            path = '$APP_BUILD_GRADLE'
+            with open(path, 'r') as f:
+                content = f.read()
+            if 'buildFeatures' not in content:
+                new_content = content.replace('android {', 'android {\n    buildFeatures {\n        buildConfig = true\n    }')
+                with open(path, 'w') as f:
+                    f.write(new_content)
+            "
+          fi
+
+          if [ ! -f supabase.properties ]; then
+            if [ -f supabase.properties.example ]; then
+              cp supabase.properties.example supabase.properties
+            else
+              touch supabase.properties
+            fi
+          fi
+
+      - name: Build Debug APK
+        run: |
+          cd "$PROJECT_DIR"
+          ./gradlew :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Find APK
+        run: |
+          find "$PROJECT_DIR/app/build/outputs" -type f -name "*.apk" -print
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: MRX-debug-APK
+          path: |
+            ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error

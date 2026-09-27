@@ -1,0 +1,391 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build debug APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+
+      # ==========================================
+      # 1. Checkout
+      # ==========================================
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+
+      # ==========================================
+      # 2. Java 17
+      # ==========================================
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+
+      # ==========================================
+      # 3. Android SDK + automatic licenses
+      # ==========================================
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          cmdline-tools-version: '15859902'
+          accept-android-sdk-licenses: true
+          log-accepted-android-sdk-licenses: false
+          packages: ''
+
+
+      # ==========================================
+      # 4. Find project
+      #
+      # Works in both cases:
+      # - Android project directly in repository
+      # - Android project inside ZIP
+      # ==========================================
+      - name: Locate Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "Locating Android project..."
+          echo "=========================================="
+
+          if [ -f "./gradlew" ] \
+            && [ -f "./settings.gradle.kts" ] \
+            && [ -d "./app" ]; then
+
+            PROJECT_DIR="$(pwd)"
+
+            echo "Android project is already at repository root."
+
+          else
+
+            ZIP_FILE="$(
+              find . \
+                -maxdepth 3 \
+                -type f \
+                -iname "*.zip" \
+                -not -path "./.git/*" \
+                | head -1
+            )"
+
+            if [ -z "$ZIP_FILE" ]; then
+              echo "::error::No Android project found."
+              echo "Neither a root Gradle project nor a ZIP file exists."
+              exit 1
+            fi
+
+            echo "ZIP found:"
+            echo "$ZIP_FILE"
+
+            rm -rf "$GITHUB_WORKSPACE/project"
+
+            mkdir -p "$GITHUB_WORKSPACE/project"
+
+            echo "Extracting ZIP..."
+
+            unzip -q "$ZIP_FILE" \
+              -d "$GITHUB_WORKSPACE/project"
+
+            echo "Searching for gradlew..."
+
+            GRADLEW="$(
+              find "$GITHUB_WORKSPACE/project" \
+                -type f \
+                -name "gradlew" \
+                | head -1
+            )"
+
+            if [ -z "$GRADLEW" ]; then
+              echo "::error::gradlew was not found inside ZIP."
+              exit 1
+            fi
+
+            PROJECT_DIR="$(dirname "$GRADLEW")"
+
+          fi
+
+          PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
+
+          echo "=========================================="
+          echo "PROJECT_DIR:"
+          echo "$PROJECT_DIR"
+          echo "=========================================="
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+
+      # ==========================================
+      # 5. Validate project structure
+      # ==========================================
+      - name: Validate project structure
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          echo "Checking project files..."
+
+          test -f "./settings.gradle.kts"
+          test -f "./build.gradle.kts"
+          test -d "./app"
+          test -f "./app/build.gradle.kts"
+          test -f "./gradlew"
+          test -f "./gradlew.bat"
+          test -f "./gradle/wrapper/gradle-wrapper.properties"
+          test -f "./gradle/wrapper/gradle-wrapper.jar"
+
+          chmod +x ./gradlew
+
+          echo "Project structure OK."
+
+
+      # ==========================================
+      # 6. Fix exact configuration from ZIP
+      # ==========================================
+      - name: Prepare Android 37 project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          echo "=========================================="
+          echo "Removing deprecated BuildConfig property"
+          echo "=========================================="
+
+          if [ -f "gradle.properties" ]; then
+            sed -i \
+              '/^[[:space:]]*android\.defaults\.buildfeatures\.buildconfig[[:space:]]*=.*/d' \
+              gradle.properties
+          fi
+
+
+          echo "=========================================="
+          echo "Configuring Android 37.0"
+          echo "=========================================="
+
+          if grep -qE \
+            '^[[:space:]]*compileSdk[[:space:]]*=[[:space:]]*37[[:space:]]*$' \
+            app/build.gradle.kts; then
+
+            if ! grep -qE \
+              '^[[:space:]]*compileSdkMinor[[:space:]]*=' \
+              app/build.gradle.kts; then
+
+              sed -i \
+                '/^[[:space:]]*compileSdk[[:space:]]*=[[:space:]]*37[[:space:]]*$/a\    compileSdkMinor = 0' \
+                app/build.gradle.kts
+            fi
+
+          else
+            echo "::error::compileSdk = 37 was not found."
+            exit 1
+          fi
+
+
+          echo "=========================================="
+          echo "Checking BuildConfig"
+          echo "=========================================="
+
+          if ! grep -q "buildConfig = true" app/build.gradle.kts; then
+            echo "::error::buildConfig = true is missing."
+            exit 1
+          fi
+
+
+          echo ""
+          echo "Current Android configuration:"
+          grep -nE \
+            'compileSdk|compileSdkMinor|targetSdk|minSdk|buildConfig' \
+            app/build.gradle.kts
+
+
+      # ==========================================
+      # 7. Install exact Android SDK packages
+      # ==========================================
+      - name: Install Android SDK components
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "Android SDK"
+          echo "=========================================="
+
+          echo "sdkmanager version:"
+          sdkmanager --version
+
+          echo ""
+          echo "Installing required packages..."
+
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-37.0" \
+            "build-tools;36.0.0"
+
+          echo ""
+          echo "Checking Android 37.0..."
+
+          test -d "${ANDROID_SDK_ROOT}/platforms/android-37.0"
+
+          echo "Android 37.0 is installed."
+
+
+      # ==========================================
+      # 8. Verify Gradle Wrapper
+      # ==========================================
+      - name: Verify Gradle Wrapper
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          EXPECTED_SHA="7a9ce74cff467ca1bf60a4fcd9f05185acceda4d0f382434d393e17864262c5d"
+
+          ACTUAL_SHA="$(
+            sha256sum gradle/wrapper/gradle-wrapper.jar \
+            | awk '{print tolower($1)}'
+          )"
+
+          echo "Expected SHA:"
+          echo "$EXPECTED_SHA"
+
+          echo "Actual SHA:"
+          echo "$ACTUAL_SHA"
+
+          if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+            echo "::error::Gradle Wrapper JAR checksum mismatch."
+            exit 1
+          fi
+
+          echo "Gradle Wrapper checksum OK."
+
+          ./gradlew --version
+
+
+      # ==========================================
+      # 9. Configure Supabase
+      # ==========================================
+      - name: Configure Supabase for build
+        shell: bash
+        env:
+          MRX_SUPABASE_URL: ${{ vars.MRX_SUPABASE_URL }}
+          MRX_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.MRX_SUPABASE_PUBLISHABLE_KEY }}
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          if [ -n "${MRX_SUPABASE_URL:-}" ] \
+            && [ -n "${MRX_SUPABASE_PUBLISHABLE_KEY:-}" ]; then
+
+            cat > supabase.properties <<EOF
+          SUPABASE_URL=${MRX_SUPABASE_URL}
+          SUPABASE_PUBLISHABLE_KEY=${MRX_SUPABASE_PUBLISHABLE_KEY}
+          SUPABASE_DATA_READ_URL=
+          SUPABASE_DATA_WRITE_URL=
+          SUPABASE_AUTH_URL=
+          SUPABASE_STORAGE_URL=
+          EOF
+
+            echo "Supabase configuration loaded from GitHub."
+
+          else
+
+            echo "Supabase secrets are not configured."
+            echo "Creating empty configuration for APK compilation."
+
+            touch supabase.properties
+
+          fi
+
+          chmod 600 supabase.properties
+
+
+      # ==========================================
+      # 10. Static project verification
+      # ==========================================
+      - name: Verify project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          python3 verify-project.py
+
+          python3 verify-completeness.py
+
+
+      # ==========================================
+      # 11. Build Debug APK
+      # ==========================================
+      - name: Build Debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          echo "=========================================="
+          echo "BUILDING APK"
+          echo "=========================================="
+
+          ./gradlew \
+            --no-daemon \
+            --stacktrace \
+            :app:assembleDebug
+
+
+      # ==========================================
+      # 12. Verify APK
+      # ==========================================
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+
+          if [ ! -f "$APK" ]; then
+            echo "::error::APK was not generated."
+            exit 1
+          fi
+
+          echo "=========================================="
+          echo "APK CREATED SUCCESSFULLY"
+          echo "=========================================="
+
+          ls -lh "$APK"
+
+
+      # ==========================================
+      # 13. Upload APK
+      # ==========================================
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: mr-x-debug-apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error

@@ -1,0 +1,84 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          cmdline-tools-version: '15859902'
+
+      - name: Accept licenses
+        run: yes | sdkmanager --licenses >/dev/null 2>&1 || true
+
+      - name: Extract project
+        run: |
+          set -e
+          unzip -q mrx-51-final-fixed-buildable.zip -d extracted
+          test -f extracted/mrx/settings.gradle.kts
+          test -f extracted/mrx/app/build.gradle.kts
+          echo "PROJECT_DIR=$GITHUB_WORKSPACE/extracted/mrx" >> "$GITHUB_ENV"
+
+      - name: Install Android SDK
+        run: |
+          set -e
+          sdkmanager --channel=3 --install \
+            platform-tools \
+            platforms\;android-37 \
+            build-tools\;36.0.0
+
+      - name: Verify project
+        run: |
+          set -e
+          cd "$PROJECT_DIR"
+          chmod +x gradlew
+          grep -q 'compileSdk = 37' app/build.gradle.kts
+          grep -q 'targetSdk = 37' app/build.gradle.kts
+
+      - name: Configure Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          if [ -n "$SUPABASE_URL" ] && [ -n "$SUPABASE_ANON_KEY" ]; then
+            printf 'SUPABASE_URL=%s\nSUPABASE_ANON_KEY=%s\n' \
+              "$SUPABASE_URL" "$SUPABASE_ANON_KEY" > \
+              "$PROJECT_DIR/supabase.properties"
+          fi
+
+      - name: Build APK
+        run: |
+          cd "$PROJECT_DIR"
+          ./gradlew clean :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Run tests
+        run: |
+          cd "$PROJECT_DIR"
+          ./gradlew :app:testDebugUnitTest --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: mrx-debug-apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error

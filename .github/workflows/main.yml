@@ -1,0 +1,83 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        cache: 'gradle'
+
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v3
+
+    - name: Accept Android SDK Licenses
+      run: yes | sdkmanager --licenses || true
+
+    - name: Install required Android SDK packages
+      run: |
+        sdkmanager "platform-tools" "platforms;android-37" "build-tools;36.0.0"
+
+    - name: Grant execute permission for gradlew
+      run: chmod +x gradlew
+
+    - name: Verify Mr.x project
+      run: |
+        test -f settings.gradle.kts
+        test -f app/build.gradle.kts
+        grep -q 'compileSdk = 37' app/build.gradle.kts
+        grep -q 'targetSdk = 37' app/build.gradle.kts
+        test -f app/src/main/AndroidManifest.xml
+        grep -q '@string/app_name' app/src/main/AndroidManifest.xml
+
+    - name: Configure Supabase
+      env:
+        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+      run: |
+        if [ -n "$SUPABASE_URL" ]; then
+          printf 'SUPABASE_URL=%s\n' "$SUPABASE_URL" > supabase.properties
+
+          if [ -n "$SUPABASE_PUBLISHABLE_KEY" ]; then
+            printf 'SUPABASE_PUBLISHABLE_KEY=%s\n' "$SUPABASE_PUBLISHABLE_KEY" >> supabase.properties
+          elif [ -n "$SUPABASE_ANON_KEY" ]; then
+            printf 'SUPABASE_PUBLISHABLE_KEY=%s\n' "$SUPABASE_ANON_KEY" >> supabase.properties
+          fi
+        fi
+
+    - name: Build Debug APK
+      run: ./gradlew clean assembleDebug --no-daemon --stacktrace
+
+    - name: Prepare Mr.x APK
+      run: |
+        set -e
+        APK="app/build/outputs/apk/debug/app-debug.apk"
+        test -f "$APK"
+        cp "$APK" "app/build/outputs/apk/debug/Mr.x.apk"
+        ls -lh "app/build/outputs/apk/debug/Mr.x.apk"
+
+    - name: Run unit tests
+      run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
+
+    - name: Upload APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: Mr.x-debug-apk
+        path: app/build/outputs/apk/debug/Mr.x.apk
+        if-no-files-found: error
